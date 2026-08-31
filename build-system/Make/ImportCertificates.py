@@ -76,6 +76,15 @@ def import_certificates(certificatesPath):
         keychain_name
     ], check_result=True)
 
+    # Ghostgram debug: show what identities actually landed in the keychain
+    run_executable_with_output('security', arguments=[
+        'find-identity',
+        '-v',
+        '-p',
+        'codesigning',
+        keychain_name
+    ], check_result=False)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='build')
