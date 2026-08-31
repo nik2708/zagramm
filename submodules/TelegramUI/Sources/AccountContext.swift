@@ -261,6 +261,10 @@ public final class AccountContextImpl: AccountContext {
     
     private var userLimitsConfigurationDisposable: Disposable?
     public private(set) var userLimits: EngineConfiguration.UserLimits
+
+    private var localPremiumDisposable: Disposable?
+    /// Ghostgram: серверное значение премиума (для Local Premium)
+    private var serverIsPremium: Bool = false
     
     private var peerNameColorsConfigurationDisposable: Disposable?
     public private(set) var peerNameColors: PeerNameColors
@@ -450,8 +454,25 @@ public final class AccountContextImpl: AccountContext {
             guard let self = self else {
                 return
             }
-            self.isPremium = isPremium
+            // Ghostgram: Local Premium — клиент считает аккаунт премиумным, если включён тумблер
+            LocalPremiumManager.shared.updateServerIsPremium(isPremium)
+            self.serverIsPremium = isPremium
+            self.isPremium = isPremium || LocalPremiumManager.shared.isEnabled
             self.userLimits = userLimits
+        })
+
+        // Ghostgram: мгновенная реакция на переключение Local Premium
+        self.localPremiumDisposable = (Signal<Void, NoError> { subscriber in
+            let observer = NotificationCenter.default.addObserver(forName: LocalPremiumManager.settingsChangedNotification, object: nil, queue: .main, using: { _ in
+                subscriber.putNext(Void())
+            })
+            return ActionDisposable { NotificationCenter.default.removeObserver(observer) }
+        }
+        |> deliverOnMainQueue).startStrict(next: { [weak self] _ in
+            guard let self = self else {
+                return
+            }
+            self.isPremium = self.serverIsPremium || LocalPremiumManager.shared.isEnabled
         })
         
         self.peerNameColorsConfigurationDisposable = (combineLatest(

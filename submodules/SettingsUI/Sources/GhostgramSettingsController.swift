@@ -20,12 +20,13 @@ private enum GhostgramSettingsEntry: ItemListNodeEntry {
     case deviceSpoof(PresentationTheme, String, String)
     case voiceMorpher(PresentationTheme, String, String)
     case sendDelay(PresentationTheme, String, String)
+    case localPremium(PresentationTheme, String, Bool)
     case info(PresentationTheme, String)
-    
+
     var section: ItemListSectionId {
         return GhostgramSettingsSection.features.rawValue
     }
-    
+
     var stableId: Int32 {
         switch self {
         case .deletedMessages:
@@ -40,8 +41,10 @@ private enum GhostgramSettingsEntry: ItemListNodeEntry {
             return 4
         case .sendDelay:
             return 5
-        case .info:
+        case .localPremium:
             return 6
+        case .info:
+            return 7
         }
     }
     
@@ -79,6 +82,12 @@ private enum GhostgramSettingsEntry: ItemListNodeEntry {
             return false
         case let .sendDelay(lhsTheme, lhsText, lhsValue):
             if case let .sendDelay(rhsTheme, rhsText, rhsValue) = rhs,
+               lhsTheme === rhsTheme, lhsText == rhsText, lhsValue == rhsValue {
+                return true
+            }
+            return false
+        case let .localPremium(lhsTheme, lhsText, lhsValue):
+            if case let .localPremium(rhsTheme, rhsText, rhsValue) = rhs,
                lhsTheme === rhsTheme, lhsText == rhsText, lhsValue == rhsValue {
                 return true
             }
@@ -164,6 +173,17 @@ private enum GhostgramSettingsEntry: ItemListNodeEntry {
                     arguments.openSendDelay()
                 }
             )
+        case let .localPremium(_, text, value):
+            return ItemListSwitchItem(
+                presentationData: presentationData,
+                title: text,
+                value: value,
+                sectionId: self.section,
+                style: .blocks,
+                updated: { value in
+                    arguments.toggleLocalPremium(value)
+                }
+            )
         case let .info(_, text):
             return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
         }
@@ -179,14 +199,16 @@ private final class GhostgramSettingsControllerArguments {
     let openDeviceSpoof: () -> Void
     let openVoiceMorpher: () -> Void
     let openSendDelay: () -> Void
-    
+    let toggleLocalPremium: (Bool) -> Void
+
     init(
         openDeletedMessages: @escaping () -> Void,
         openGhostMode: @escaping () -> Void,
         openMisc: @escaping () -> Void,
         openDeviceSpoof: @escaping () -> Void,
         openVoiceMorpher: @escaping () -> Void,
-        openSendDelay: @escaping () -> Void
+        openSendDelay: @escaping () -> Void,
+        toggleLocalPremium: @escaping (Bool) -> Void
     ) {
         self.openDeletedMessages = openDeletedMessages
         self.openGhostMode = openGhostMode
@@ -194,6 +216,7 @@ private final class GhostgramSettingsControllerArguments {
         self.openDeviceSpoof = openDeviceSpoof
         self.openVoiceMorpher = openVoiceMorpher
         self.openSendDelay = openSendDelay
+        self.toggleLocalPremium = toggleLocalPremium
     }
 }
 
@@ -209,6 +232,7 @@ private struct GhostgramSettingsState: Equatable {
     var voiceMorpherEnabled: Bool
     var voiceMorpherPresetName: String
     var sendDelayEnabled: Bool
+    var localPremiumEnabled: Bool
     
     static func current() -> GhostgramSettingsState {
         return GhostgramSettingsState(
@@ -220,7 +244,8 @@ private struct GhostgramSettingsState: Equatable {
             deviceSpoofEnabled: DeviceSpoofManager.shared.isEnabled,
             voiceMorpherEnabled: VoiceMorpherManager.shared.isEnabled,
             voiceMorpherPresetName: VoiceMorpherManager.shared.selectedPreset.name,
-            sendDelayEnabled: SendDelayManager.shared.isEnabled
+            sendDelayEnabled: SendDelayManager.shared.isEnabled,
+            localPremiumEnabled: LocalPremiumManager.shared.isEnabled
         )
     }
 }
@@ -256,9 +281,12 @@ private func ghostgramSettingsControllerEntries(
     // Send Delay
     let sendDelayStatus = state.sendDelayEnabled ? "Вкл" : "Выкл"
     entries.append(.sendDelay(presentationData.theme, "Отложка сообщений", sendDelayStatus))
-    
+
+    // Local Premium
+    entries.append(.localPremium(presentationData.theme, "Локальный Premium", state.localPremiumEnabled))
+
     // Info
-    entries.append(.info(presentationData.theme, "Функции конфиденциальности Ghostgram. Скрытые отметки о прочтении, обход исчезающих сообщений, обход защиты от пересылки и другое."))
+    entries.append(.info(presentationData.theme, "Функции конфиденциальности Ghostgram. Скрытые отметки о прочтении, обход исчезающих сообщений, обход защиты от пересылки и другое. «Локальный Premium» разблокирует только клиентские премиум-функции: серверные лимиты (папки, загрузка файлов >4 ГБ и т.п.) остаются — их Telegram проверяет на своей стороне."))
     
     return entries
 }
@@ -289,6 +317,11 @@ public func ghostgramSettingsController(context: AccountContext) -> ViewControll
         },
         openSendDelay: {
             pushControllerImpl?(sendDelayController(context: context), true)
+        },
+        toggleLocalPremium: { value in
+            LocalPremiumManager.shared.isEnabled = value
+            let newState = GhostgramSettingsState.current()
+            statePromise.set(newState)
         }
     )
     

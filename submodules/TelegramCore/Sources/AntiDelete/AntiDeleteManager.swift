@@ -11,6 +11,7 @@ public final class AntiDeleteManager {
     private let defaults = UserDefaults.standard
     private let enabledKey = "antiDelete.enabled"
     private let archiveMediaKey = "antiDelete.archiveMedia"
+    private let fetchMissingMediaKey = "antiDelete.fetchMissingMedia"
     private let deletedMessageTransparencyKey = "antiDelete.deletedMessageTransparency"
     private let deletedMarkKey = "antiDelete.deletedMarkText"
 
@@ -24,6 +25,17 @@ public final class AntiDeleteManager {
     public var archiveMedia: Bool {
         get { defaults.bool(forKey: archiveMediaKey) }
         set { defaults.set(newValue, forKey: archiveMediaKey) }
+    }
+
+    /// Докачивать ли ещё не скачанное медиа удаляемого сообщения (как в AyuGram)
+    public var fetchMissingMedia: Bool {
+        get {
+            if defaults.object(forKey: fetchMissingMediaKey) == nil {
+                return true
+            }
+            return defaults.bool(forKey: fetchMissingMediaKey)
+        }
+        set { defaults.set(newValue, forKey: fetchMissingMediaKey) }
     }
 
     /// Минимальное значение прозрачности удалённого сообщения
@@ -67,8 +79,9 @@ public final class AntiDeleteManager {
         }
     }
 
-    // MARK: - Deleted Message IDs Storage
+    // MARK: - SQLite storage
 
+    private let storage: AntiDeleteStorage?
     private var deletedMessageIds: Set<String> = []
     private let deletedIdsLock = NSLock()
 
@@ -78,7 +91,7 @@ public final class AntiDeleteManager {
         deletedIdsLock.lock()
         deletedMessageIds.insert(key)
         deletedIdsLock.unlock()
-        persistStorage()
+        storage?.insertDeletedId(key: key)
     }
 
     /// Проверить, является ли сообщение удалённым
@@ -97,19 +110,12 @@ public final class AntiDeleteManager {
         return text.hasPrefix("\(deletedMarkText) ")
     }
 
-    // MARK: - File-backed storage
+    // MARK: - Legacy JSON migration
 
-    /// Всё хранится в JSON-файле, а не в UserDefaults:
-    /// UserDefaults плохо переносит мегабайты данных, а история удалённых растёт неограниченно.
-    private struct Storage: Codable {
+    private struct LegacyStorage: Codable {
         var archive: [ArchivedMessage] = []
         var deletedIds: [String] = []
     }
-
-    private let storageLock = NSLock()
-    private var storage = Storage()
-    private let storageURL: URL
-    private let mediaDirectory: URL
 
     /// Структура архивированного сообщения
     public struct ArchivedMessage: Codable {
@@ -173,6 +179,8 @@ public final class AntiDeleteManager {
         }
     }
 
+    private let mediaDirectory: URL
+
     private init() {
         // Set default values
         if defaults.object(forKey: enabledKey) == nil {
@@ -192,98 +200,67 @@ public final class AntiDeleteManager {
             supportDirectory = FileManager.default.temporaryDirectory
         }
         let rootDirectory = supportDirectory.appendingPathComponent("GhostgramArchive", isDirectory: true)
-        self.storageURL = rootDirectory.appendingPathComponent("archive.json")
         self.mediaDirectory = rootDirectory.appendingPathComponent("media", isDirectory: true)
 
         try? FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: self.mediaDirectory, withIntermediateDirectories: true)
 
-        loadStorage()
-        migrateFromUserDefaultsIfNeeded()
+        self.storage = AntiDeleteStorage(directory: rootDirectory)
+        if let storage = storage {
+            deletedIdsLock.lock()
+            deletedMessageIds = storage.deletedIds()
+            deletedIdsLock.unlock()
+            migrateLegacyJSON(from: rootDirectory.appendingPathComponent("archive.json"))
+            migrateLegacyUserDefaults()
+        } else {
+            // БД не открылась — деградируем до пустого архива, приложение продолжает работать
+            print("[AntiDelete] storage unavailable, anti-delete archive disabled until restart")
+        }
     }
 
-    // MARK: - Persistence
-
-    private let storageQueue = DispatchQueue(label: "com.ghostgram.antiDelete.storage", qos: .utility)
-    private var persistScheduled = false
-
-    private func loadStorage() {
-        guard let data = try? Data(contentsOf: storageURL) else { return }
+    /// Одноразовая миграция JSON-хранилища фазы 2а в SQLite
+    private func migrateLegacyJSON(from url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard let data = try? Data(contentsOf: url) else { return }
         do {
-            storage = try JSONDecoder().decode(Storage.self, from: data)
-        } catch {
-            print("[AntiDelete] Failed to load storage: \(error)")
-            storage = Storage()
-        }
-    }
-
-    /// Записывает хранилище на диск. Дебаунится, чтобы массовое удаление
-    /// (тысячи сообщений) не приводило к перезаписи всего файла на каждое сообщение.
-    private func persistStorage() {
-        storageLock.lock()
-        if persistScheduled {
-            storageLock.unlock()
-            return
-        }
-        persistScheduled = true
-        storageLock.unlock()
-
-        storageQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.flushStorage()
-        }
-    }
-
-    /// Немедленная запись (для операций, результат которых нельзя терять)
-    private func flushStorage() {
-        storageLock.lock()
-        persistScheduled = false
-        let data: Data?
-        do {
-            data = try JSONEncoder().encode(storage)
-        } catch {
-            data = nil
-            print("[AntiDelete] Failed to encode storage: \(error)")
-        }
-        storageLock.unlock()
-
-        if let data = data {
-            do {
-                try data.write(to: storageURL, options: .atomic)
-            } catch {
-                print("[AntiDelete] Failed to save storage: \(error)")
+            let legacy = try JSONDecoder().decode(LegacyStorage.self, from: data)
+            for message in legacy.archive {
+                storage?.insertArchived(message)
             }
+            for key in legacy.deletedIds {
+                deletedIdsLock.lock()
+                deletedMessageIds.insert(key)
+                deletedIdsLock.unlock()
+                storage?.insertDeletedId(key: key)
+            }
+            try? FileManager.default.removeItem(at: url)
+            print("[AntiDelete] migrated \(legacy.archive.count) messages from JSON store")
+        } catch {
+            print("[AntiDelete] legacy JSON migration failed: \(error)")
         }
     }
 
-    /// Одноразовая миграция старого хранилища из UserDefaults
+    /// Одноразовая миграция самого старого хранилища (UserDefaults)
     private let legacyArchiveKey = "antiDelete.archive"
     private let legacyDeletedIdsKey = "antiDelete.deletedIds"
 
-    private func migrateFromUserDefaultsIfNeeded() {
-        var migrated = false
+    private func migrateLegacyUserDefaults() {
         if let data = defaults.data(forKey: legacyArchiveKey),
            let legacyArchive = try? JSONDecoder().decode([ArchivedMessage].self, from: data) {
-            storageLock.lock()
-            let existing = Set(storage.archive.map { $0.globalId })
-            storage.archive.append(contentsOf: legacyArchive.filter { !existing.contains($0.globalId) })
-            storageLock.unlock()
+            for message in legacyArchive {
+                storage?.insertArchived(message)
+            }
             defaults.removeObject(forKey: legacyArchiveKey)
-            migrated = true
         }
         if let ids = defaults.stringArray(forKey: legacyDeletedIdsKey) {
-            storageLock.lock()
-            let existing = Set(storage.deletedIds)
-            storage.deletedIds.append(contentsOf: ids.filter { !existing.contains($0) })
-            storageLock.unlock()
+            for key in ids {
+                deletedIdsLock.lock()
+                deletedMessageIds.insert(key)
+                deletedIdsLock.unlock()
+                storage?.insertDeletedId(key: key)
+            }
             defaults.removeObject(forKey: legacyDeletedIdsKey)
-            migrated = true
         }
-        if migrated {
-            flushStorage()
-        }
-        storageLock.lock()
-        deletedMessageIds = Set(storage.deletedIds)
-        storageLock.unlock()
     }
 
     // MARK: - Media Archival
@@ -295,6 +272,22 @@ public final class AntiDeleteManager {
     /// - Returns: имя файла внутри архива, либо nil
     public func archiveMediaFile(sourcePath: String, peerId: Int64, messageId: Int32, fileExtension: String?) -> String? {
         guard isEnabled, archiveMedia else { return nil }
+        let name = "\(peerId)_\(messageId)"
+        return copyMediaFileToArchive(sourcePath: sourcePath, baseName: name, fileExtension: fileExtension)
+    }
+
+    /// Прикрепляет докачанный файл к уже архивированной записи (отложенная архивация).
+    /// Имя строится от globalId, чтобы избежать коллизий с мгновенными копиями.
+    public func attachArchivedMedia(globalId: Int32, peerId: Int64, sourcePath: String, fileExtension: String?, kind: ArchivedMediaKind) {
+        guard isEnabled, archiveMedia else { return }
+        let name = "g\(globalId)_\(peerId)"
+        guard let archivedName = copyMediaFileToArchive(sourcePath: sourcePath, baseName: name, fileExtension: fileExtension ?? kind.defaultFileExtension) else {
+            return
+        }
+        storage?.updateMedia(globalId: globalId, peerId: peerId, mediaPath: archivedName, mediaKind: kind.rawValue)
+    }
+
+    private func copyMediaFileToArchive(sourcePath: String, baseName: String, fileExtension: String?) -> String? {
         let fm = FileManager.default
         var isDirectory: ObjCBool = false
         guard fm.fileExists(atPath: sourcePath, isDirectory: &isDirectory), !isDirectory.boolValue else {
@@ -311,7 +304,7 @@ public final class AntiDeleteManager {
         if ext.isEmpty {
             ext = ArchivedMediaKind.file.defaultFileExtension
         }
-        let name = "\(peerId)_\(messageId).\(ext)"
+        let name = "\(baseName).\(ext)"
         let destination = mediaDirectory.appendingPathComponent(name)
         if fm.fileExists(atPath: destination.path) {
             return name
@@ -341,17 +334,6 @@ public final class AntiDeleteManager {
     // MARK: - Archive Operations
 
     /// Архивировать сообщение перед удалением
-    /// - Parameters:
-    ///   - globalId: Глобальный ID сообщения
-    ///   - peerId: ID чата
-    ///   - messageId: Локальный ID сообщения
-    ///   - timestamp: Время отправки
-    ///   - authorId: ID автора
-    ///   - text: Текст сообщения
-    ///   - forwardAuthorId: ID автора пересланного сообщения
-    ///   - mediaDescription: Описание медиа (тип, размер)
-    ///   - mediaPath: Имя архивированного медиа-файла
-    ///   - mediaKind: Тип архивированного медиа
     public func archiveMessage(
         globalId: Int32,
         peerId: Int64,
@@ -380,73 +362,46 @@ public final class AntiDeleteManager {
             mediaKind: mediaKind
         )
 
-        storageLock.lock()
-        defer { storageLock.unlock() }
-
-        // Avoid duplicates
-        if !storage.archive.contains(where: { $0.globalId == globalId && $0.peerId == peerId }) {
-            storage.archive.append(archived)
-            persistStorage()
-        }
+        storage?.insertArchived(archived)
     }
 
     /// Получить все архивированные сообщения
     public func getAllArchivedMessages() -> [ArchivedMessage] {
-        storageLock.lock()
-        defer { storageLock.unlock() }
-        return storage.archive.sorted { $0.deletedAt > $1.deletedAt }
+        return storage?.allArchived() ?? []
     }
 
     /// Получить архивированные сообщения для конкретного чата
     /// - Parameter peerId: ID чата
     public func getArchivedMessages(forPeerId peerId: Int64) -> [ArchivedMessage] {
-        storageLock.lock()
-        defer { storageLock.unlock() }
-        return storage.archive
-            .filter { $0.peerId == peerId }
-            .sorted { $0.deletedAt > $1.deletedAt }
+        return storage?.archived(peerId: peerId) ?? []
     }
 
     /// Количество архивированных сообщений
     public var archivedCount: Int {
-        storageLock.lock()
-        defer { storageLock.unlock() }
-        return storage.archive.count
+        return storage?.count() ?? 0
     }
 
     /// Получить данные архивированных сообщений для удаления из диалогов
     /// Возвращает массив (peerId, messageId)
     public func getArchivedMessageData() -> [(peerId: Int64, messageId: Int32)] {
-        storageLock.lock()
-        defer { storageLock.unlock() }
-        return storage.archive.map { (peerId: $0.peerId, messageId: $0.messageId) }
+        return storage?.archivedIds() ?? []
     }
 
     /// Очистить архив
     public func clearArchive() {
-        storageLock.lock()
-        let mediaPaths = storage.archive.map { $0.mediaPath }
-        storage.archive.removeAll()
-        storage.deletedIds.removeAll()
-        deletedIdsLock.lock()
-        deletedMessageIds.removeAll()
-        deletedIdsLock.unlock()
-        storageLock.unlock()
-
+        let mediaPaths = storage?.clear() ?? []
         for path in mediaPaths {
             removeArchivedMediaFile(path)
         }
-        flushStorage()
+        deletedIdsLock.lock()
+        deletedMessageIds.removeAll()
+        deletedIdsLock.unlock()
     }
 
     /// Удалить конкретное сообщение из архива
     public func removeFromArchive(globalId: Int32) {
-        storageLock.lock()
-        let mediaPath = storage.archive.first(where: { $0.globalId == globalId })?.mediaPath
-        storage.archive.removeAll { $0.globalId == globalId }
-        storageLock.unlock()
-
-        removeArchivedMediaFile(mediaPath)
-        flushStorage()
+        if let mediaPath = storage?.deleteArchived(globalId: globalId) {
+            removeArchivedMediaFile(mediaPath)
+        }
     }
 }

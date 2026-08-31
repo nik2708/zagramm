@@ -3677,54 +3677,133 @@ private func pollChannel(accountPeerId: PeerId, postbox: Postbox, network: Netwo
 // MARK: - Ghostgram: media archival for anti-delete
 // Копирует уже скачанные медиа-файлы удаляемого сообщения в защищённый архив,
 // чтобы они переживали очистку кэша (как «save, not cache» в AyuGram).
+private func ghostgramMediaInfo(_ media: Media) -> (resource: MediaResource, kind: AntiDeleteManager.ArchivedMediaKind, fileExtension: String?)? {
+    if let image = media as? TelegramMediaImage {
+        if let representation = image.representations.last {
+            return (representation.resource, .photo, "jpg")
+        }
+        return nil
+    } else if let file = media as? TelegramMediaFile {
+        var kind: AntiDeleteManager.ArchivedMediaKind = .file
+        if file.isVideo {
+            kind = .video
+        } else if file.isVoice {
+            kind = .voice
+        } else if file.isInstantVideo {
+            kind = .videoMessage
+        } else if file.isSticker {
+            kind = .sticker
+        } else if file.isAnimated {
+            kind = .animation
+        }
+        var ext: String?
+        if let fileName = file.fileName {
+            let fileExt = (fileName as NSString).pathExtension
+            if !fileExt.isEmpty {
+                ext = fileExt
+            }
+        }
+        return (file.resource, kind, ext)
+    }
+    return nil
+}
+
 private func ghostgramArchivedMediaForMessage(_ message: Message, mediaBox: MediaBox) -> (path: String?, kind: String?) {
     guard AntiDeleteManager.shared.isEnabled, AntiDeleteManager.shared.archiveMedia else {
         return (nil, nil)
     }
     for media in message.media {
-        var resource: MediaResource?
-        var kind: AntiDeleteManager.ArchivedMediaKind = .file
-        var ext: String?
-        if let image = media as? TelegramMediaImage {
-            resource = image.representations.last?.resource
-            kind = .photo
-            ext = "jpg"
-        } else if let file = media as? TelegramMediaFile {
-            resource = file.resource
-            if file.isVideo {
-                kind = .video
-            } else if file.isVoice {
-                kind = .voice
-            } else if file.isInstantVideo {
-                kind = .videoMessage
-            } else if file.isSticker {
-                kind = .sticker
-            } else if file.isAnimated {
-                kind = .animation
-            } else {
-                kind = .file
-            }
-            if let fileName = file.fileName {
-                let fileExt = (fileName as NSString).pathExtension
-                if !fileExt.isEmpty {
-                    ext = fileExt
-                }
-            }
-        } else {
-            continue
-        }
-        if let resource = resource, let completedPath = mediaBox.completedResourcePath(resource) {
+        guard let info = ghostgramMediaInfo(media) else { continue }
+        if let completedPath = mediaBox.completedResourcePath(info.resource) {
             if let archivedName = AntiDeleteManager.shared.archiveMediaFile(
                 sourcePath: completedPath,
                 peerId: message.id.peerId.toInt64(),
                 messageId: message.id.id,
-                fileExtension: ext ?? kind.defaultFileExtension
+                fileExtension: info.fileExtension ?? info.kind.defaultFileExtension
             ) {
-                return (archivedName, kind.rawValue)
+                return (archivedName, info.kind.rawValue)
             }
         }
     }
     return (nil, nil)
+}
+
+/// Докачка ещё не скачанного медиа удаляемого сообщения (как в AyuGram):
+/// ставит ресурс в очередь скачивания, после завершения копирует файл в архив
+/// и прикрепляет его к уже созданной записи истории удалений.
+private final class GhostgramDeferredMediaFetch {
+    static let shared = GhostgramDeferredMediaFetch()
+
+    private let queue = DispatchQueue(label: "com.ghostgram.deferredMediaFetch", qos: .utility)
+    private var disposables: [String: Disposable] = [:]
+
+    func schedule(message: Message, mediaBox: MediaBox, globalId: Int32) {
+        guard AntiDeleteManager.shared.isEnabled,
+              AntiDeleteManager.shared.archiveMedia,
+              AntiDeleteManager.shared.fetchMissingMedia else {
+            return
+        }
+        let peerId = message.id.peerId.toInt64()
+        for media in message.media {
+            guard let info = ghostgramMediaInfo(media) else { continue }
+            let key = info.resource.id.stringRepresentation
+            self.queue.async { [weak self] in
+                guard let self = self else { return }
+                guard self.disposables[key] == nil else { return }
+                // уже скачано? тогда немедленная архивация не требовалась по какой-то причине — всё равно сохраним
+                if let completedPath = mediaBox.completedResourcePath(info.resource) {
+                    AntiDeleteManager.shared.attachArchivedMedia(
+                        globalId: globalId,
+                        peerId: peerId,
+                        sourcePath: completedPath,
+                        fileExtension: info.fileExtension,
+                        kind: info.kind
+                    )
+                    return
+                }
+                let disposable = fetchedMediaResource(
+                    mediaBox: mediaBox,
+                    userLocation: .other,
+                    userContentType: .other,
+                    reference: MediaResourceReference.media(
+                        media: AnyMediaReference.message(message: MessageReference(message), media: media),
+                        resource: info.resource
+                    ),
+                    statsCategory: .generic,
+                    continueInBackground: true
+                ).start(next: { [weak self] _ in
+                    self?.archiveIfReady(mediaBox: mediaBox, info: info, globalId: globalId, peerId: peerId, key: key)
+                }, error: { [weak self] _ in
+                    self?.finish(key: key)
+                }, completed: { [weak self] in
+                    self?.archiveIfReady(mediaBox: mediaBox, info: info, globalId: globalId, peerId: peerId, key: key)
+                })
+                self.disposables[key] = disposable
+            }
+        }
+    }
+
+    private func archiveIfReady(mediaBox: MediaBox, info: (resource: MediaResource, kind: AntiDeleteManager.ArchivedMediaKind, fileExtension: String?), globalId: Int32, peerId: Int64, key: String) {
+        self.queue.async { [weak self] in
+            defer { self?.finish(key: key) }
+            guard let completedPath = mediaBox.completedResourcePath(info.resource) else { return }
+            AntiDeleteManager.shared.attachArchivedMedia(
+                globalId: globalId,
+                peerId: peerId,
+                sourcePath: completedPath,
+                fileExtension: info.fileExtension,
+                kind: info.kind
+            )
+        }
+    }
+
+    private func finish(key: String) {
+        self.queue.async { [weak self] in
+            if let disposable = self?.disposables.removeValue(forKey: key) {
+                disposable.dispose()
+            }
+        }
+    }
 }
 
 private func verifyTransaction(_ transaction: Transaction, finalState: AccountMutableState) -> Bool {
@@ -4467,6 +4546,9 @@ func replayFinalState(
                                 mediaPath: archivedMedia.path,
                                 mediaKind: archivedMedia.kind
                             )
+                            if archivedMedia.path == nil {
+                                GhostgramDeferredMediaFetch.shared.schedule(message: message, mediaBox: mediaBox, globalId: globalId)
+                            }
                         }
                     }
                     
@@ -4551,6 +4633,9 @@ func replayFinalState(
                                 mediaPath: archivedMedia.path,
                                 mediaKind: archivedMedia.kind
                             )
+                            if archivedMedia.path == nil {
+                                GhostgramDeferredMediaFetch.shared.schedule(message: message, mediaBox: mediaBox, globalId: messageId.id)
+                            }
                         }
                     }
                     

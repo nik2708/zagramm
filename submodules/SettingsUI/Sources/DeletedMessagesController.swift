@@ -29,8 +29,9 @@ private enum DeletedMessagesSection: Int32 {
 private enum DeletedMessagesEntry: ItemListNodeEntry {
     case enableToggle(PresentationTheme, String, Bool)
     case archiveMediaToggle(PresentationTheme, String, Bool)
+    case fetchMissingMediaToggle(PresentationTheme, String, Bool)
     case history(PresentationTheme, String, String)
-    case markStyle(PresentationTheme, String, String)
+    case markInput(PresentationTheme, String, String)
     case transparencySlider(PresentationTheme, Int32, Bool)
     case settingsInfo(PresentationTheme, String)
 
@@ -46,12 +47,14 @@ private enum DeletedMessagesEntry: ItemListNodeEntry {
             return 1
         case .history:
             return 2
-        case .markStyle:
+        case .markInput:
             return 3
-        case .transparencySlider:
+        case .fetchMissingMediaToggle:
             return 4
-        case .settingsInfo:
+        case .transparencySlider:
             return 5
+        case .settingsInfo:
+            return 6
         }
     }
     
@@ -75,8 +78,14 @@ private enum DeletedMessagesEntry: ItemListNodeEntry {
                 return true
             }
             return false
-        case let .markStyle(lhsTheme, lhsText, lhsValue):
-            if case let .markStyle(rhsTheme, rhsText, rhsValue) = rhs,
+        case let .markInput(lhsTheme, lhsText, lhsValue):
+            if case let .markInput(rhsTheme, rhsText, rhsValue) = rhs,
+               lhsTheme === rhsTheme, lhsText == rhsText, lhsValue == rhsValue {
+                return true
+            }
+            return false
+        case let .fetchMissingMediaToggle(lhsTheme, lhsText, lhsValue):
+            if case let .fetchMissingMediaToggle(rhsTheme, rhsText, rhsValue) = rhs,
                lhsTheme === rhsTheme, lhsText == rhsText, lhsValue == rhsValue {
                 return true
             }
@@ -135,16 +144,30 @@ private enum DeletedMessagesEntry: ItemListNodeEntry {
                     arguments.openHistory()
                 }
             )
-        case let .markStyle(_, text, value):
-            return ItemListDisclosureItem(
+        case let .fetchMissingMediaToggle(_, text, value):
+            return ItemListSwitchItem(
                 presentationData: presentationData,
                 title: text,
-                label: value,
+                value: value,
                 sectionId: self.section,
                 style: .blocks,
-                action: {
-                    arguments.cycleMarkStyle()
+                updated: { value in
+                    arguments.toggleFetchMissingMedia(value)
                 }
+            )
+        case let .markInput(_, text, value):
+            return ItemListSingleLineInputItem(
+                presentationData: presentationData,
+                title: NSAttributedString(string: text, textColor: presentationData.theme.list.itemPrimaryTextColor),
+                text: value,
+                placeholder: "🗑️",
+                type: .regular(capitalization: false, autocorrection: false),
+                maxLength: 8,
+                sectionId: self.section,
+                textUpdated: { value in
+                    arguments.updateMarkText(value)
+                },
+                action: {}
             )
         case let .transparencySlider(theme, value, isEnabled):
             return DeletedMessagesTransparencySliderItem(
@@ -167,21 +190,24 @@ private enum DeletedMessagesEntry: ItemListNodeEntry {
 private final class DeletedMessagesControllerArguments {
     let toggleEnabled: (Bool) -> Void
     let toggleArchiveMedia: (Bool) -> Void
+    let toggleFetchMissingMedia: (Bool) -> Void
     let openHistory: () -> Void
-    let cycleMarkStyle: () -> Void
+    let updateMarkText: (String) -> Void
     let updateTransparency: (Int32) -> Void
 
     init(
         toggleEnabled: @escaping (Bool) -> Void,
         toggleArchiveMedia: @escaping (Bool) -> Void,
+        toggleFetchMissingMedia: @escaping (Bool) -> Void,
         openHistory: @escaping () -> Void,
-        cycleMarkStyle: @escaping () -> Void,
+        updateMarkText: @escaping (String) -> Void,
         updateTransparency: @escaping (Int32) -> Void
     ) {
         self.toggleEnabled = toggleEnabled
         self.toggleArchiveMedia = toggleArchiveMedia
+        self.toggleFetchMissingMedia = toggleFetchMissingMedia
         self.openHistory = openHistory
-        self.cycleMarkStyle = cycleMarkStyle
+        self.updateMarkText = updateMarkText
         self.updateTransparency = updateTransparency
     }
 }
@@ -191,6 +217,7 @@ private final class DeletedMessagesControllerArguments {
 private struct DeletedMessagesControllerState: Equatable {
     var isEnabled: Bool
     var archiveMedia: Bool
+    var fetchMissingMedia: Bool
     var archivedCount: Int
     var markText: String
     var transparencyPercent: Int32
@@ -198,6 +225,7 @@ private struct DeletedMessagesControllerState: Equatable {
     static func ==(lhs: DeletedMessagesControllerState, rhs: DeletedMessagesControllerState) -> Bool {
         return lhs.isEnabled == rhs.isEnabled &&
                lhs.archiveMedia == rhs.archiveMedia &&
+               lhs.fetchMissingMedia == rhs.fetchMissingMedia &&
                lhs.archivedCount == rhs.archivedCount &&
                lhs.markText == rhs.markText &&
                lhs.transparencyPercent == rhs.transparencyPercent
@@ -214,10 +242,11 @@ private func deletedMessagesControllerEntries(
     
     entries.append(.enableToggle(presentationData.theme, "Сохранять удалённые сообщения", state.isEnabled))
     entries.append(.archiveMediaToggle(presentationData.theme, "Архивировать медиа", state.archiveMedia))
+    entries.append(.fetchMissingMediaToggle(presentationData.theme, "Докачивать медиа при удалении", state.fetchMissingMedia))
     entries.append(.history(presentationData.theme, "История удалений", state.archivedCount == 0 ? "Пусто" : "\(state.archivedCount)"))
-    entries.append(.markStyle(presentationData.theme, "Метка удалённых", state.markText))
+    entries.append(.markInput(presentationData.theme, "Метка удалённых", state.markText))
     entries.append(.transparencySlider(presentationData.theme, state.transparencyPercent, state.isEnabled))
-    entries.append(.settingsInfo(presentationData.theme, "Когда включено, сообщения, удалённые другими пользователями, будут сохраняться локально. «Архивировать медиа» копирует уже скачанные фото и видео в защищённую папку — они не пропадут после очистки кэша. Прозрачность влияет только на сообщения, которые уже помечены как удалённые."))
+    entries.append(.settingsInfo(presentationData.theme, "Когда включено, сообщения, удалённые другими пользователями, будут сохраняться локально. «Архивировать медиа» копирует медиа в защищённую папку, «докачивать» — скачивает ещё не загруженные файлы в момент удаления. История переживает очистку кэша и хранится в SQLite-базе. Метка показывается рядом с удалёнными сообщениями."))
     
     return entries
 }
@@ -230,6 +259,7 @@ public func deletedMessagesController(context: AccountContext) -> ViewController
     let initialState = DeletedMessagesControllerState(
         isEnabled: AntiDeleteManager.shared.isEnabled,
         archiveMedia: AntiDeleteManager.shared.archiveMedia,
+        fetchMissingMedia: AntiDeleteManager.shared.fetchMissingMedia,
         archivedCount: AntiDeleteManager.shared.archivedCount,
         markText: AntiDeleteManager.shared.deletedMarkText,
         transparencyPercent: clampDeletedMessageTransparencyPercent(Int32(round(AntiDeleteManager.shared.deletedMessageTransparency * 100.0)))
@@ -258,18 +288,22 @@ public func deletedMessagesController(context: AccountContext) -> ViewController
                 return state
             }
         },
+        toggleFetchMissingMedia: { value in
+            AntiDeleteManager.shared.fetchMissingMedia = value
+            updateState { state in
+                var state = state
+                state.fetchMissingMedia = value
+                return state
+            }
+        },
         openHistory: {
             pushControllerImpl?(deletedMessagesHistoryController(context: context), true)
         },
-        cycleMarkStyle: {
-            let presets = ["🗑️", "👻", "❌", "🚫", "💀", "🗿", "🌑"]
-            let current = AntiDeleteManager.shared.deletedMarkText
-            let index = presets.firstIndex(of: current) ?? -1
-            let next = presets[(index + 1) % presets.count]
-            AntiDeleteManager.shared.deletedMarkText = next
+        updateMarkText: { value in
+            AntiDeleteManager.shared.deletedMarkText = value
             updateState { state in
                 var state = state
-                state.markText = next
+                state.markText = value
                 return state
             }
         },
@@ -316,6 +350,7 @@ public func deletedMessagesController(context: AccountContext) -> ViewController
             var state = state
             state.isEnabled = AntiDeleteManager.shared.isEnabled
             state.archiveMedia = AntiDeleteManager.shared.archiveMedia
+            state.fetchMissingMedia = AntiDeleteManager.shared.fetchMissingMedia
             state.archivedCount = AntiDeleteManager.shared.archivedCount
             state.markText = AntiDeleteManager.shared.deletedMarkText
             state.transparencyPercent = clampDeletedMessageTransparencyPercent(Int32(round(AntiDeleteManager.shared.deletedMessageTransparency * 100.0)))
