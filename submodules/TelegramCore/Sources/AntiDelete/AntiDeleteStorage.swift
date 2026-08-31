@@ -85,11 +85,11 @@ final class AntiDeleteStorage {
             return sqlite3_column_int64(statement, index)
         }
         return AntiDeleteManager.ArchivedMessage(
-            globalId: Int32(bitPattern: UInt32(bitPattern: sqlite3_column_int64(statement, 1))),
+            globalId: Int32(truncatingIfNeeded: sqlite3_column_int64(statement, 1)),
             peerId: sqlite3_column_int64(statement, 2),
-            messageId: Int32(bitPattern: UInt32(bitPattern: sqlite3_column_int64(statement, 3))),
-            timestamp: Int32(bitPattern: UInt32(bitPattern: sqlite3_column_int64(statement, 4))),
-            deletedAt: Int32(bitPattern: UInt32(bitPattern: sqlite3_column_int64(statement, 5))),
+            messageId: Int32(truncatingIfNeeded: sqlite3_column_int64(statement, 3)),
+            timestamp: Int32(truncatingIfNeeded: sqlite3_column_int64(statement, 4)),
+            deletedAt: Int32(truncatingIfNeeded: sqlite3_column_int64(statement, 5)),
             authorId: optionalInt64(6),
             text: readText(statement, 7) ?? "",
             forwardAuthorId: optionalInt64(8),
@@ -205,7 +205,7 @@ final class AntiDeleteStorage {
             defer { sqlite3_finalize(statement) }
             var result: [(peerId: Int64, messageId: Int32)] = []
             while sqlite3_step(statement) == SQLITE_ROW {
-                result.append((sqlite3_column_int64(statement, 0), Int32(bitPattern: UInt32(bitPattern: sqlite3_column_int64(statement, 1)))))
+                result.append((sqlite3_column_int64(statement, 0), Int32(truncatingIfNeeded: sqlite3_column_int64(statement, 1))))
             }
             return result
         }
