@@ -81,9 +81,11 @@ def import_certificates(certificatesPath):
 
     # Ghostgram debug: verify the search list and visible identities
     print('=== keychain search list ===')
-    run_executable_with_output('security', arguments=['list-keychains', '-d', 'user'], check_result=False)
+    output = run_executable_with_output('security', arguments=['list-keychains', '-d', 'user'], check_result=False)
+    print(output)
     print('=== codesigning identities ===')
-    run_executable_with_output('security', arguments=['find-identity', '-v', '-p', 'codesigning'], check_result=False)
+    output = run_executable_with_output('security', arguments=['find-identity', '-v', '-p', 'codesigning'], check_result=False)
+    print(output)
 
 
 if __name__ == '__main__':
