@@ -3674,6 +3674,59 @@ private func pollChannel(accountPeerId: PeerId, postbox: Postbox, network: Netwo
     }
 }
 
+// MARK: - Ghostgram: media archival for anti-delete
+// Копирует уже скачанные медиа-файлы удаляемого сообщения в защищённый архив,
+// чтобы они переживали очистку кэша (как «save, not cache» в AyuGram).
+private func ghostgramArchivedMediaForMessage(_ message: Message, mediaBox: MediaBox) -> (path: String?, kind: String?) {
+    guard AntiDeleteManager.shared.isEnabled, AntiDeleteManager.shared.archiveMedia else {
+        return (nil, nil)
+    }
+    for media in message.media {
+        var resource: MediaResource?
+        var kind: AntiDeleteManager.ArchivedMediaKind = .file
+        var ext: String?
+        if let image = media as? TelegramMediaImage {
+            resource = image.representations.last?.resource
+            kind = .photo
+            ext = "jpg"
+        } else if let file = media as? TelegramMediaFile {
+            resource = file.resource
+            if file.isVideo {
+                kind = .video
+            } else if file.isVoice {
+                kind = .voice
+            } else if file.isInstantVideo {
+                kind = .videoMessage
+            } else if file.isSticker {
+                kind = .sticker
+            } else if file.isAnimated {
+                kind = .animation
+            } else {
+                kind = .file
+            }
+            if let fileName = file.fileName {
+                let fileExt = (fileName as NSString).pathExtension
+                if !fileExt.isEmpty {
+                    ext = fileExt
+                }
+            }
+        } else {
+            continue
+        }
+        if let resource = resource, let completedPath = mediaBox.completedResourcePath(resource) {
+            if let archivedName = AntiDeleteManager.shared.archiveMediaFile(
+                sourcePath: completedPath,
+                peerId: message.id.peerId.toInt64(),
+                messageId: message.id.id,
+                fileExtension: ext ?? kind.defaultFileExtension
+            ) {
+                return (archivedName, kind.rawValue)
+            }
+        }
+    }
+    return (nil, nil)
+}
+
 private func verifyTransaction(_ transaction: Transaction, finalState: AccountMutableState) -> Bool {
     var hadUpdateState = false
     var channelsWithUpdatedStates = Set<PeerId>()
@@ -4400,6 +4453,8 @@ func replayFinalState(
                                 }
                             }
                             
+                            let archivedMedia = ghostgramArchivedMediaForMessage(message, mediaBox: mediaBox)
+
                             AntiDeleteManager.shared.archiveMessage(
                                 globalId: globalId,
                                 peerId: messageId.peerId.toInt64(),
@@ -4408,7 +4463,9 @@ func replayFinalState(
                                 authorId: message.author?.id.toInt64(),
                                 text: textContent,
                                 forwardAuthorId: message.forwardInfo?.author?.id.toInt64(),
-                                mediaDescription: mediaDesc
+                                mediaDescription: mediaDesc,
+                                mediaPath: archivedMedia.path,
+                                mediaKind: archivedMedia.kind
                             )
                         }
                     }
@@ -4480,6 +4537,8 @@ func replayFinalState(
                                 }
                             }
                             
+                            let archivedMedia = ghostgramArchivedMediaForMessage(message, mediaBox: mediaBox)
+
                             AntiDeleteManager.shared.archiveMessage(
                                 globalId: messageId.id,
                                 peerId: messageId.peerId.toInt64(),
@@ -4488,7 +4547,9 @@ func replayFinalState(
                                 authorId: message.author?.id.toInt64(),
                                 text: textContent,
                                 forwardAuthorId: message.forwardInfo?.author?.id.toInt64(),
-                                mediaDescription: mediaDesc
+                                mediaDescription: mediaDesc,
+                                mediaPath: archivedMedia.path,
+                                mediaKind: archivedMedia.kind
                             )
                         }
                     }

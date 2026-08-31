@@ -428,6 +428,11 @@ public class ChatMessageTextBubbleContentNode: ChatMessageBubbleContentNode {
                         } else {
                             rawText = item.message.text
                         }
+                        // MARK: - Ghostgram: customizable deleted mark
+                        // Appended at the end so MessageTextEntity ranges stay valid
+                        if item.message.ghostgramIsDeleted, !rawText.isEmpty {
+                            rawText += " \(AntiDeleteManager.shared.deletedMarkText)"
+                        }
                     }
                     
                     for attribute in item.message.attributes {
