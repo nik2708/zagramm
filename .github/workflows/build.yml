@@ -38,13 +38,13 @@ jobs:
       - name: Disk space report
         run: df -h /
 
-      - name: Cache bazel
-        uses: actions/cache@v4
+      - name: Restore bazel disk cache
+        uses: actions/cache/restore@v4
         with:
-          path: /private/var/tmp/_bazel_containerhost
-          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock', 'versions.json') }}
+          path: /private/var/tmp/telegram-bazel-disk-cache
+          key: bazel-disk-v3-${{ github.run_number }}
           restore-keys: |
-            bazel-${{ runner.os }}-
+            bazel-disk-v3-
 
       - name: Create canonical source directory
         run: |
@@ -63,6 +63,11 @@ jobs:
           # use canonical bazel root (must match the cache path above)
           BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
 
+          # transportable content-addressed cache: survives flag changes, reused across runs
+          DISK_CACHE="/private/var/tmp/telegram-bazel-disk-cache"
+          sudo mkdir -p "$DISK_CACHE"
+          sudo chown -R "$(id -un)" "$DISK_CACHE"
+
           cd $SOURCE_DIR
 
           BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
@@ -77,6 +82,7 @@ jobs:
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
+            --cacheDir="$DISK_CACHE" \
             build \
             --configurationPath="build-system/appstore-configuration.json" \
             --codesigningInformationPath=build-system/fake-codesigning \
@@ -87,9 +93,21 @@ jobs:
           OUTPUT_PATH="build/artifacts"
           rm -rf "$OUTPUT_PATH"
           mkdir -p "$OUTPUT_PATH"
-          for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa; do
-            cp "$f" $OUTPUT_PATH/
-          done
+          if [ -f bazel-bin/Telegram/Telegram.ipa ]; then
+            cp bazel-bin/Telegram/Telegram.ipa "$OUTPUT_PATH/"
+          else
+            for f in bazel-out/*/bin/Telegram/Telegram.ipa; do
+              cp "$f" "$OUTPUT_PATH/"
+            done
+          fi
+          ls -la "$OUTPUT_PATH"
+
+      - name: Save bazel disk cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /private/var/tmp/telegram-bazel-disk-cache
+          key: bazel-disk-v3-${{ github.run_number }}
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
