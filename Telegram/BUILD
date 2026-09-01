@@ -557,23 +557,16 @@ store_signin_fragment = """
 """
 signin_fragment = store_signin_fragment if telegram_bundle_id in store_bundle_ids else ""
 
+# Ghostgram sideload build: minimal entitlements. All custom capabilities
+# (app groups, iCloud, associated domains, push, CarPlay, Sign in with Apple)
+# are stripped — a free Apple ID cannot provide them, and stale team-scoped
+# entitlements from Telegram's provisioning hang the app at launch (black screen).
+# Sideloadly/AltStore inject proper entitlements for the signing account anyway.
 plist_fragment(
     name = "TelegramEntitlements",
     extension = "entitlements",
     template = "".join([
-        aps_fragment,
-        beta_reports_active_fragment,
         get_task_allow_fragment,
-        app_groups_fragment,
-        siri_fragment,
-        associated_domains_fragment,
-        icloud_fragment,
-        apple_pay_merchants_fragment,
-        unrestricted_voip_fragment,
-        carplay_fragment,
-        communication_notifications_fragment,
-        notification_filtering_fragment,
-        signin_fragment,
     ])
 )
 
