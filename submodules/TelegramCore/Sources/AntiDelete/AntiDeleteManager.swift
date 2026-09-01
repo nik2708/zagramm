@@ -183,8 +183,11 @@ public final class AntiDeleteManager {
 
     private init() {
         // Set default values
+        // Bisect build: anti-delete hook disabled by default (enable in Ghostgram settings
+        // after confirming the app launches) to rule out the state-replay interception
+        // as the cause of the startup black screen
         if defaults.object(forKey: enabledKey) == nil {
-            defaults.set(true, forKey: enabledKey)
+            defaults.set(false, forKey: enabledKey)
         }
         if defaults.object(forKey: archiveMediaKey) == nil {
             defaults.set(true, forKey: archiveMediaKey)
