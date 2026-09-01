@@ -93,7 +93,7 @@ jobs:
             --buildNumber="$BUILD_NUMBER"
 
           # collect ipa
-          OUTPUT_PATH="build/artifacts"
+          OUTPUT_PATH="$SOURCE_DIR/build/artifacts"
           rm -rf "$OUTPUT_PATH"
           mkdir -p "$OUTPUT_PATH"
           if [ -f bazel-bin/Telegram/Telegram.ipa ]; then
@@ -107,7 +107,7 @@ jobs:
 
           # slim sideload variant: no appex extensions, no fake provisioning —
           # much friendlier to free-Apple-ID re-signing (Sideloadly/AltStore)
-          SLIM_DIR="build/slim"
+          SLIM_DIR="$SOURCE_DIR/build/slim"
           rm -rf "$SLIM_DIR"
           mkdir -p "$SLIM_DIR"
           unzip -qq "$OUTPUT_PATH/Telegram.ipa" -d "$SLIM_DIR"
