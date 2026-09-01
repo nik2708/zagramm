@@ -105,6 +105,17 @@ jobs:
           fi
           ls -la "$OUTPUT_PATH"
 
+          # slim sideload variant: no appex extensions, no fake provisioning —
+          # much friendlier to free-Apple-ID re-signing (Sideloadly/AltStore)
+          SLIM_DIR="build/slim"
+          rm -rf "$SLIM_DIR"
+          mkdir -p "$SLIM_DIR"
+          unzip -qq "$OUTPUT_PATH/Telegram.ipa" -d "$SLIM_DIR"
+          rm -rf "$SLIM_DIR/Payload/Telegram.app/PlugIns"
+          rm -f "$SLIM_DIR/Payload/Telegram.app/embedded.mobileprovision"
+          (cd "$SLIM_DIR" && find . -type f | sort | zip -qX -@ "$OUTPUT_PATH/Telegram-slim.ipa")
+          ls -la "$OUTPUT_PATH"
+
       - name: Save bazel disk cache
         if: always()
         uses: actions/cache/save@v4
@@ -112,11 +123,13 @@ jobs:
           path: /private/var/tmp/telegram-bazel-disk-cache
           key: bazel-disk-v3-${{ github.run_number }}
 
-      - name: Upload IPA artifact
+      - name: Upload IPA artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Telegram-unsigned-ipa
-          path: /Users/Shared/telegram-ios/build/artifacts/Telegram.ipa
+          path: |
+            /Users/Shared/telegram-ios/build/artifacts/Telegram.ipa
+            /Users/Shared/telegram-ios/build/artifacts/Telegram-slim.ipa
           compression-level: 0
           retention-days: 30
 
@@ -128,5 +141,6 @@ jobs:
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Ghostgram ${{ env.APP_VERSION }} (build ${{ github.run_number }})" \
-            --notes "Unsigned IPA ${{ env.APP_VERSION }} (build ${{ github.run_number }}). Sign it with Sideloadly / AltStore / Apple Developer certificate before installing." \
-            "/Users/Shared/telegram-ios/build/artifacts/Telegram.ipa#Telegram.ipa"
+            --notes "Unsigned IPAs ${{ env.APP_VERSION }} (build ${{ github.run_number }}). Telegram-slim.ipa (no extensions) is recommended for Sideloadly with a free Apple ID; Telegram.ipa is the full build. Sign before installing." \
+            "/Users/Shared/telegram-ios/build/artifacts/Telegram.ipa#Telegram.ipa" \
+            "/Users/Shared/telegram-ios/build/artifacts/Telegram-slim.ipa#Telegram-slim.ipa"
