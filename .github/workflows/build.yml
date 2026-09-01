@@ -87,7 +87,7 @@ jobs:
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             --cacheDir="$DISK_CACHE" \
             build \
-            --configurationPath="build-system/appstore-configuration.json" \
+            --configurationPath="build-system/sideload-configuration.json" \
             --codesigningInformationPath=build-system/fake-codesigning \
             --configuration=release_arm64 \
             --buildNumber="$BUILD_NUMBER"
